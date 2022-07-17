@@ -1,8 +1,13 @@
 from typing import *
+import pkg_resources
 import asyncio
-import os
 import json
+import numpy as np
+import itertools as it
 from datetime import datetime, timezone as tz
+
+from pathlib import Path
+from operator import attrgetter
 from anchorpy import Idl, Program, Provider, Context, Wallet
 from anchorpy.error import AccountDoesNotExistError
 from solana.publickey import PublicKey
@@ -12,10 +17,12 @@ from solana.rpc.async_api import AsyncClient
 from solana.rpc.types import TxOpts
 from solana.sysvar import SYSVAR_RENT_PUBKEY
 from solana.system_program import SYS_PROGRAM_ID
+from solana.transaction import TransactionInstruction
 from spl.token.instructions import get_associated_token_address
 from spl.token.constants import TOKEN_PROGRAM_ID
 
 from . import util, types, config
+from .util import decode_wrapped_i80f48
 from .config import configs, Config
 from .types import (
     Side,
@@ -126,7 +133,7 @@ class Zo:
         if url is None:
             url = config.CLUSTER_URL
 
-        idl_path = os.path.join(os.path.dirname(__file__), "idl.json")
+        idl_path = Path(pkg_resources.resource_filename("zo", "idl.json"))
         with open(idl_path) as f:
             raw_idl = json.load(f)
 
@@ -315,7 +322,7 @@ class Zo:
             mark_price = util.decode_wrapped_i80f48(mark.price) * price_adj
 
             if types.perp_type_to_str(m.perp_type, program=self.program) == "square":
-                index_price = index_price**2 / m.strike
+                index_price = index_price ** 2 / m.strike
 
             funding_sample_start = datetime.fromtimestamp(
                 mark.twap.last_sample_start_time, tz=tz.utc
@@ -475,13 +482,13 @@ class Zo:
 
     async def deposit(
         self,
-        amount: float,
+        amount: int,
         /,
         *,
         mint: PublicKey,
         repay_only: bool = False,
         token_account: None | PublicKey = None,
-    ) -> str:
+    ) -> TransactionInstruction:
         """Deposit collateral into the margin account.
 
         Args:
@@ -497,10 +504,10 @@ class Zo:
         if token_account is None:
             token_account = get_associated_token_address(self.wallet.public_key, mint)
 
-        decimals = self.collaterals[mint].decimals
-        amount = util.big_to_small_amount(amount, decimals=decimals)
+        # decimals = self.collaterals[mint].decimals
+        # amount = util.big_to_small_amount(amount, decimals=decimals)
 
-        return await self.program.rpc["deposit"](
+        return self.program.instruction["deposit"](
             repay_only,
             amount,
             ctx=Context(
@@ -519,13 +526,13 @@ class Zo:
 
     async def withdraw(
         self,
-        amount: float,
+        amount: int,
         /,
         *,
         mint: PublicKey,
         allow_borrow: bool = False,
         token_account: None | PublicKey = None,
-    ) -> str:
+    ) -> TransactionInstruction:
         """Withdraw collateral from the margin account.
 
         Args:
@@ -544,10 +551,10 @@ class Zo:
         if token_account is None:
             token_account = get_associated_token_address(self.wallet.public_key, mint)
 
-        decimals = self.collaterals[mint].decimals
-        amount = util.big_to_small_amount(amount, decimals=decimals)
+        # decimals = self.collaterals[mint].decimals
+        # amount = util.big_to_small_amount(amount, decimals=decimals)
 
-        return await self.program.rpc["withdraw"](
+        return self.program.instruction["withdraw"](
             allow_borrow,
             amount,
             ctx=Context(
@@ -652,7 +659,7 @@ class Zo:
                 )
             ]
 
-        return await self.program.rpc["place_perp_order_with_max_ts"](
+        return self.program.instruction["place_perp_order_with_max_ts"](
             is_long,
             price,
             base_qty,
@@ -660,7 +667,7 @@ class Zo:
             order_type_,
             limit,
             client_id,
-            max_ts if max_ts is not None else 2**63 - 1,
+            max_ts if max_ts is not None else 2 ** 63 - 1,
             ctx=Context(
                 accounts={
                     "state": self.__config.ZO_STATE_ID,
@@ -744,3 +751,114 @@ class Zo:
             The transaction signature.
         """
         return await self.__cancel_order(symbol=symbol, client_id=client_id)
+
+    def cancel_all_perp_orders(
+        self, symbol: str, limit: int = 10
+    ) -> TransactionInstruction:
+        mkt = self.__dex_markets[symbol]
+        oo = self._get_open_orders_info(symbol)
+
+        if oo is None:
+            raise ValueError("open orders account is uninitialized")
+
+        return self.program.instruction["cancel_all_perp_orders"](
+            limit,
+            ctx=Context(
+                accounts={
+                    "authority": self.wallet.public_key,
+                    "state": self.__config.ZO_STATE_ID,
+                    "cache": self._zo_state.cache,
+                    "state_signer": self._zo_state_signer,
+                    "margin": self._zo_margin_key,
+                    "control": self._zo_margin.control,
+                    "oo": oo.key,
+                    "dex_market": mkt.own_address,
+                    "req_q": mkt.req_q,
+                    "event_q": mkt.event_q,
+                    "market_bids": mkt.bids,
+                    "market_asks": mkt.asks,
+                    "dex_program": self.__config.ZO_DEX_ID,
+                }
+            ),
+        )
+
+    def update_perp_funding(self, symbol) -> TransactionInstruction:
+
+        mkt = self.__dex_markets[symbol]
+
+        return self.program.instruction["update_perp_funding"](
+            ctx=Context(
+                accounts={
+                    "state": self.__config.ZO_STATE_ID,
+                    "state_signer": self._zo_state_signer,
+                    "cache": self._zo_state.cache,
+                    "dex_market": mkt.own_address,
+                    "market_bids": mkt.bids,
+                    "market_asks": mkt.asks,
+                    "dex_program": self.__config.ZO_DEX_ID,
+                }
+            ),
+        )
+
+    # TODO: adapt this to the zo-sdk
+    # async def get_delta_exposures(self, authority: PublicKey):
+    #     control = await self.control(authority)
+    #     state = await self.state
+    #     oracle_prices = await self.get_oracle_prices()
+
+    #     n_assets = len(self.asset_map.values())
+    #     positions = np.array(list(map(attrgetter("pos_size"), control.open_orders_agg)))
+    #     asset_decimals = np.array(
+    #         list(map(attrgetter("asset_decimals"), state.perp_markets))
+    #     )
+    #     delta = (positions / 10**asset_decimals)[: state.total_markets][:n_assets]
+    #     first_derivative = [
+    #         defaultdict(lambda: 1, [("SQUARE", 2 * price)])[asset.split("-")[-1]]
+    #         for asset, price in zip(self.asset_map.values(), oracle_prices[:n_assets])
+    #     ]
+
+    #     sorted_delta = sorted(
+    #         zip(
+    #             [asset.split("-")[0] for asset in self.asset_map.values()],
+    #             (delta * first_derivative),
+    #         ),
+    #         key=itemgetter(0),
+    #     )
+    #     summed_delta = [
+    #         (k, sum(map(itemgetter(1), g)))
+    #         for k, g in it.groupby(sorted_delta, key=itemgetter(0))
+    #     ]
+    #     return summed_delta
+
+    async def get_funding(self):
+        def __get_funding(self, mark, oracle, market):
+            # num_5min_intervals = np.floor_divide(
+            #     mark.twap.last_sample_start_time % 3600 / 60, 5
+            # )
+            price_adj = 10 ** (market.asset_decimals - 6)
+            mark_price = decode_wrapped_i80f48(mark.price) * price_adj
+            index_price = decode_wrapped_i80f48(oracle.price) * price_adj
+
+            if market.perp_type == self.perp_type.Square():
+                index_price = index_price ** 2 / market.strike
+
+            funding_sample_start = mark.twap.last_sample_start_time
+            minute = int(funding_sample_start % 3600 / 60)
+            cumul_avg = decode_wrapped_i80f48(mark.twap.cumul_avg)
+
+            if abs(cumul_avg) == 0 or minute == 0:
+                return 0
+
+            daily_funding = cumul_avg / minute
+            return np.clip(daily_funding, a_min=-0.05, a_max=0.05) * 365
+
+        funding = [
+            __get_funding(self, marks, oracle, market)
+            for market, marks in it.islice(
+                zip(self._zo_state.perp_markets, self._zo_cache.marks),
+                self._zo_state.total_markets,
+            )
+            for oracle in self._zo_cache.oracles
+            if oracle.symbol == market.oracle_symbol
+        ]
+        return funding

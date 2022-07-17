@@ -22,6 +22,35 @@ mkdocs-material = "^8.2.5"
 [tool.pyright]
 reportWildcardImportFromLibrary = false
 
+[tool.pdm]
+includes = ["zo"]
+[tool.pdm.dev-dependencies]
+dev = [
+    "black<23.0.0,>=22.1.0",
+    "mkdocstrings<1.0.0,>=0.18.1",
+    "mkdocs-material<9.0.0,>=8.2.5",
+]
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["pdm-pep517"]
+build-backend = "pdm.pep517.api"
+
+[project]
+name = "zo-sdk"
+version = "0.1.3"
+description = "01.xyz Python SDK"
+authors = [
+    {name = "pyz4", email = "pyz4"},
+    {name = "Sheheryar Parvaz",email = "me@cherryman.org"}
+]
+dependencies = [
+    "anchorpy>=0.9.3",
+    "solana>=0.25.0",
+    "numpy>=1.23.1",
+]
+requires-python = ">=3.10,<4.0"
+license = {text = "Apache-2.0"}
+readme = "README.md"
+
+[project.urls]
+repository = "https://github.com/01protocol/zo-sdk-py"
+documentation = "https://01protocol.github.io/zo-sdk-py/"
