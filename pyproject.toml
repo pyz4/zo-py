@@ -38,7 +38,7 @@ build-backend = "pdm.pep517.api"
 
 [project]
 name = "zo-sdk"
-version = "914.1.4"
+version = "914.1.5"
 description = "01.xyz Python SDK"
 authors = [
     { name = "pyz4", email = "pyz4" },

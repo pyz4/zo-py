@@ -1,3 +1,4 @@
+from collections import defaultdict
 from typing import *
 import pkg_resources
 import asyncio
@@ -7,7 +8,7 @@ import itertools as it
 from datetime import datetime, timezone as tz
 
 from pathlib import Path
-from operator import attrgetter
+from operator import attrgetter, itemgetter
 from anchorpy import Idl, Program, Provider, Context, Wallet
 from anchorpy.error import AccountDoesNotExistError
 from solana.publickey import PublicKey
@@ -73,6 +74,7 @@ class Zo:
 
     _zo_state: Any
     _zo_state_signer: PublicKey
+    _zo_heimdall_key: PublicKey
     _zo_cache: Any
     _zo_margin: Any
     _zo_margin_key: None | PublicKey
@@ -87,6 +89,7 @@ class Zo:
         _state_signer,
         _margin,
         _margin_key,
+        _heimdall_key,
     ):
         self.__program = _program
         self.__config = _config
@@ -94,14 +97,16 @@ class Zo:
         self._zo_state_signer = _state_signer
         self._zo_margin = _margin
         self._zo_margin_key = _margin_key
+        self._zo_heimdall_key = _heimdall_key
 
     @classmethod
     async def new(
         cls,
         *,
-        cluster: Literal["devnet", "mainnet"],
+        conn: AsyncClient,
+        # cluster: Literal["devnet", "mainnet"],
         payer: Keypair | None = None,
-        url: str | None = None,
+        # url: str | None = None,
         load_margin: bool = True,
         create_margin: bool = True,
         tx_opts: TxOpts = TxOpts(
@@ -125,20 +130,23 @@ class Zo:
             tx_opts: The transaction options.
         """
 
-        if cluster not in configs.keys():
-            raise TypeError(f"`cluster` must be one of: {configs.keys()}")
+        # if cluster not in configs.keys():
+        #     raise TypeError(f"`cluster` must be one of: {configs.keys()}")
 
+        # hardcode mainnet for now
+        cluster = (
+            "devnet"
+            if conn._provider.endpoint_uri == "https://api.devnet.solana.com"
+            else "mainnet"
+        )
         config = configs[cluster]
-
-        if url is None:
-            url = config.CLUSTER_URL
 
         idl_path = Path(pkg_resources.resource_filename("zo", "idl.json"))
         with open(idl_path) as f:
             raw_idl = json.load(f)
 
         idl = Idl.from_json(raw_idl)
-        conn = AsyncClient(url)
+        # conn = AsyncClient(url)
         wallet = Wallet(payer) if payer is not None else Wallet.local()
         provider = Provider(conn, wallet, opts=tx_opts)
         program = Program(idl, config.ZO_PROGRAM_ID, provider=provider)
@@ -322,7 +330,7 @@ class Zo:
             mark_price = util.decode_wrapped_i80f48(mark.price) * price_adj
 
             if types.perp_type_to_str(m.perp_type, program=self.program) == "square":
-                index_price = index_price ** 2 / m.strike
+                index_price = index_price**2 / m.strike
 
             funding_sample_start = datetime.fromtimestamp(
                 mark.twap.last_sample_start_time, tz=tz.utc
@@ -667,7 +675,7 @@ class Zo:
             order_type_,
             limit,
             client_id,
-            max_ts if max_ts is not None else 2 ** 63 - 1,
+            max_ts if max_ts is not None else 2**63 - 1,
             ctx=Context(
                 accounts={
                     "state": self.__config.ZO_STATE_ID,
@@ -800,35 +808,54 @@ class Zo:
             ),
         )
 
+    def get_oracle_prices(self):
+        state = self._zo_state
+        cache = self._zo_cache
+
+        prices = [
+            decode_wrapped_i80f48(oracle.twap)
+            * 10 ** (oracle.base_decimals - oracle.quote_decimals)
+            for market in it.islice(state.perp_markets, state.total_markets)
+            for oracle in cache.oracles
+            if oracle.symbol == market.oracle_symbol
+        ]
+        return prices[: state.total_markets]
+
     # TODO: adapt this to the zo-sdk
-    # async def get_delta_exposures(self, authority: PublicKey):
-    #     control = await self.control(authority)
-    #     state = await self.state
-    #     oracle_prices = await self.get_oracle_prices()
+    def get_delta_exposures(self):
 
-    #     n_assets = len(self.asset_map.values())
-    #     positions = np.array(list(map(attrgetter("pos_size"), control.open_orders_agg)))
-    #     asset_decimals = np.array(
-    #         list(map(attrgetter("asset_decimals"), state.perp_markets))
-    #     )
-    #     delta = (positions / 10**asset_decimals)[: state.total_markets][:n_assets]
-    #     first_derivative = [
-    #         defaultdict(lambda: 1, [("SQUARE", 2 * price)])[asset.split("-")[-1]]
-    #         for asset, price in zip(self.asset_map.values(), oracle_prices[:n_assets])
-    #     ]
+        control = self._zo_control
+        state = self._zo_state
+        oracle_prices = self.get_oracle_prices()
 
-    #     sorted_delta = sorted(
-    #         zip(
-    #             [asset.split("-")[0] for asset in self.asset_map.values()],
-    #             (delta * first_derivative),
-    #         ),
-    #         key=itemgetter(0),
-    #     )
-    #     summed_delta = [
-    #         (k, sum(map(itemgetter(1), g)))
-    #         for k, g in it.groupby(sorted_delta, key=itemgetter(0))
-    #     ]
-    #     return summed_delta
+        n_assets = len(self.markets)
+        positions = np.array(list(map(attrgetter("pos_size"), control.open_orders_agg)))
+        asset_decimals = np.array(
+            list(map(attrgetter("asset_decimals"), state.perp_markets))
+        )
+        delta = (positions / 10**asset_decimals)[: state.total_markets][:n_assets]
+        first_derivative = [
+            defaultdict(lambda: 1, [("SQUARE", 2 * price)])[asset.split("-")[-1]]
+            for asset, price in zip(
+                map(self._markets_map, range(n_assets)), oracle_prices[:n_assets]
+            )
+        ]
+
+        sorted_delta = sorted(
+            zip(
+                [
+                    asset.split("-")[0]
+                    for asset in map(self._markets_map, range(n_assets))
+                ],
+                (delta * first_derivative),
+            ),
+            key=itemgetter(0),
+        )
+        summed_delta = [
+            (k, sum(map(itemgetter(1), g)))
+            for k, g in it.groupby(sorted_delta, key=itemgetter(0))
+        ]
+        return summed_delta
 
     async def get_funding(self):
         def __get_funding(self, mark, oracle, market):
@@ -840,7 +867,7 @@ class Zo:
             index_price = decode_wrapped_i80f48(oracle.price) * price_adj
 
             if market.perp_type == self.perp_type.Square():
-                index_price = index_price ** 2 / market.strike
+                index_price = index_price**2 / market.strike
 
             funding_sample_start = mark.twap.last_sample_start_time
             minute = int(funding_sample_start % 3600 / 60)
