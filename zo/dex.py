@@ -89,7 +89,8 @@ class Market(NamedTuple):
         return cls.from_bytes(base64.b64decode(b))
 
     def _decode_orderbook_from_base64(self, bids: str, asks: str):
-        return Orderbook(Slab.from_base64(bids), Slab.from_base64(asks), self)
+        # return Orderbook(Slab.from_base64(bids), Slab.from_base64(asks), self)
+        return Orderbook(Slab.from_bytes(bids), Slab.from_bytes(asks), self)
 
 
 class SlabNode:

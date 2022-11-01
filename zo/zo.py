@@ -427,9 +427,8 @@ class Zo:
         res: Any = await self.connection.get_multiple_accounts(
             ks, encoding="base64", commitment=commitment
         )
-        res = res["result"]["value"]
         self.__dex_markets = {
-            self.__markets_map[i]: Market.from_base64(res[i]["data"][0])
+            self.__markets_map[i]: Market.from_bytes(res.value[i].data)
             for i in range(len(self.__markets))
         }
 
@@ -442,15 +441,14 @@ class Zo:
         res: Any = await self.connection.get_multiple_accounts(
             ks, encoding="base64", commitment=commitment
         )
-        res = res["result"]["value"]
+        # res = res["result"]["value"]
+        res = res.value
         orders = self._zo_margin and {}
         orderbook = {}
 
         for i in range(len(self.__markets)):
             mkt = self.__dex_markets[self.__markets_map[i]]
-            ob = mkt._decode_orderbook_from_base64(
-                res[2 * i]["data"][0], res[2 * i + 1]["data"][0]
-            )
+            ob = mkt._decode_orderbook_from_base64(res[2 * i].data, res[2 * i + 1].data)
             orderbook[self.__markets_map[i]] = ob
 
             if self._zo_margin is not None:
